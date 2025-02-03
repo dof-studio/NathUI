@@ -6,7 +6,7 @@
 `NathUI` は、フロントエンドとバックエンドが混在する大規模な言語モデルインタラクションフレームワークです。大規模な予測モデルのバックエンドにデプロイまたは接続し、ユーザーの指示に基づいて強化された動作を提供します。サポートされていないアプリケーションにインタラクティブなサービスを提供できます。インターネット検索、特定の Web ページへのアクセス、ローカル データベースへのアクセス、およびアプリケーション ツールの大規模な言語モデルは、ユーザーの指示によって実行される上記の機能をサポートします。
 
 # Attribution
-`NathUI` is an external project of dof-studio. Although its repository belongs to dof-studio, it is independently led and produced by Mr. NathMath. NathMath and dof-studio share all rights under their license agreement.
+`NathUI` is an external project of dof-studio. Although its repository belongs to dof-studio, it is independently led and produced by Mr. NathMath. Mr. NathMath and dof-studio mutually share all rights under their license agreement.
 
 `NathUI` 是一个dof-studio的外部项目。尽管它的仓库归属于dof-studio，它是由NathMath先生独立领导和制作的。 NathMath和dof-studio共享其许可证约定下的所有权益。
 
