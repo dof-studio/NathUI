@@ -11,3 +11,5 @@
 `NathUI` 是一个dof-studio的外部项目。尽管它的仓库归属于dof-studio，它是由NathMath先生独立领导和制作的。 NathMath和dof-studio共享其许可证约定下的所有权益。
 
 `NathUI` は dof-studio の外部プロジェクトです。リポジトリは dof-studio が所有していますが、NathMath 氏が独立して主導し、制作しています。 NathMath と dof-studio は、ライセンス契約に基づいてすべての権利と利益を共有します。
+
+# File Structure
