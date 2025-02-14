@@ -1,0 +1,3 @@
+python argsettings.py
+
+pause
