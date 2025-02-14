@@ -6,7 +6,7 @@
 `NathUI` は、フロントエンドとバックエンドが混在する大規模な言語モデルインタラクションフレームワークです。大規模な予測モデルのバックエンドにデプロイまたは接続し、ユーザーの指示に基づいて強化された動作を提供します。サポートされていないアプリケーションにインタラクティブなサービスを提供できます。インターネット検索、特定の Web ページへのアクセス、ローカル データベースへのアクセス、およびアプリケーション ツールの大規模な言語モデルは、ユーザーの指示によって実行される上記の機能をサポートします。さらに、独立した Nath UI ブラウザは、推論インタラクションと Web ブラウジングをサポートする新しい推論フロントエンドとしても機能します。
 
 # Attribution
-`NathUI` is an external proje, or Fork
+`NathUI` is an external project of DOF Studio.
 
 Welcome to contribute to this repository, including reporting bugs, submitting code, or forking repositories.
 
