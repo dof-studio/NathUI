@@ -1067,8 +1067,8 @@ class MyQMainWindow(QMainWindow):
     def about(self):  # about
         QMessageBox.about(self, "关于",
                           "<h4>NathUI</h4>"
-                          '<p>author: DOF-Studio/NathMath@<a href="https://space.bilibili.com/303266889" style="color: #3598db;">bilibili</a></p>'
-                          '<p>source:  <a href="https://github.com/dof-studio/NathUI" style="color: #3598db;">github</a></p>'
+                          '<p>author: NathMath@<a href="https://space.bilibili.com/303266889" style="color: #3598db;">bilibili</a></p>'
+                          '<p>source:  <a href="https://github.com/dof-studio/NathUI" style="color: #3598db;">dof-studio</a></p>'
                           "<p>Copyright &copy; 2025 NathUI</p>"
                           '<p>License:  <a href="http://www.apache.org/licenses/" style="color: #3598db;">Apache License</a></p>'
                           )
@@ -1194,7 +1194,7 @@ class NathUI_MainBrowser(MyQMainWindow):
         load_webpage_nathui.triggered.connect(self.load_opensource_webpage)
         help_menu.addAction(load_webpage_nathui)
 
-        # show about
+        # show about (need to remove the above 2 redundant functions and merge them into about?)
         show_about = QAction("关于", self)
         show_about.triggered.connect(self.about)
         help_menu.addAction(show_about)
