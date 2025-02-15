@@ -3,7 +3,7 @@
 # Nath UI Project
 # DOF Studio/Nathmath all rights reserved
 # Open sourced under Apache 2.0 License
-
+import ctypes
 # It is a FREE and OPEN SOURCED software
 # See github.com/dof-studio/NathUI
 
@@ -25,7 +25,7 @@ from PyQt5.QtWidgets import (
 )
 from PyQt5.QtWebEngineWidgets import QWebEngineView, QWebEngineSettings, QWebEnginePage, QWebEngineProfile
 from PyQt5.QtCore import Qt, QUrl, QThread, pyqtSignal, QObject, pyqtSlot, QStandardPaths
-from PyQt5.QtGui import QColor, QFont
+from PyQt5.QtGui import QColor, QFont, QIcon
 from PyQt5.QtWebChannel import QWebChannel
 from PyQt5.QtGui import QDesktopServices
 # pip install --upgrade PyQt5 PyQtWebEngine
@@ -1275,7 +1275,12 @@ class NathUI_MainBrowser(QMainWindow):
 def main():
     app = QApplication(sys.argv)
     try:
+        # show the logo to the windows taskbar
+        appid = 'pyqt6.python.NathUI'
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(appid)
+
         window = NathUI_MainBrowser()
+        window.setWindowIcon(QIcon("__static__/icon.png"))
         window.show()
         sys.exit(app.exec_())
     except:
