@@ -1039,6 +1039,8 @@ class MyQMainWindow(QMainWindow):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.initial_pos = None
+        self.resize(WINDOW_WIDTH, WINDOW_HEIGHT)
+        self.center_window()
 
     # Global blank spaces can be dragged
     def mousePressEvent(self, event):  # press
@@ -1062,6 +1064,23 @@ class MyQMainWindow(QMainWindow):
         super().mouseReleaseEvent(event)
         event.accept()
 
+    def about(self):  # about
+        QMessageBox.about(self, "关于",
+                          "<h4>NathUI</h4>"
+                          '<p>author: DOF-Studio/NathMath@<a href="https://space.bilibili.com/303266889" style="color: #3598db;">bilibili</a></p>'
+                          '<p>source:  <a href="https://github.com/dof-studio/NathUI" style="color: #3598db;">github</a></p>'
+                          "<p>Copyright &copy; 2025 NathUI</p>"
+                          '<p>License:  <a href="http://www.apache.org/licenses/" style="color: #3598db;">Apache License</a></p>'
+                          )
+
+    def center_window(self):
+        screen = QApplication.primaryScreen()
+        if screen is not None:
+            screen_geometry = screen.availableGeometry()
+            x = int((screen_geometry.width() - self.width()) / 2)
+            y = int((screen_geometry.height() - self.height()) / 2)
+            self.move(x, y)
+
 
 # NathUI_MainBrowser (Most Exterior Window)
 # Main window, manage tabs, toolbars, menus, status bar and global settings
@@ -1072,7 +1091,7 @@ class NathUI_MainBrowser(MyQMainWindow):
 
         # Nath UI @by NathMath
         self.setWindowTitle("Nath UI")
-        self.setGeometry(100, 100, WINDOW_WIDTH, WINDOW_HEIGHT)
+        # self.setGeometry(100, 100, WINDOW_WIDTH, WINDOW_HEIGHT) # instead of self.center_window
 
         # Global Initialized Settings
         self.current_theme = "Light"
@@ -1174,6 +1193,11 @@ class NathUI_MainBrowser(MyQMainWindow):
         load_webpage_nathui = QAction("开源官网", self)
         load_webpage_nathui.triggered.connect(self.load_opensource_webpage)
         help_menu.addAction(load_webpage_nathui)
+
+        # show about
+        show_about = QAction("关于", self)
+        show_about.triggered.connect(self.about)
+        help_menu.addAction(show_about)
 
         ########
         # Working on
