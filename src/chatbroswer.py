@@ -1276,7 +1276,7 @@ def main():
     app = QApplication(sys.argv)
     try:
         # show the logo to the windows taskbar
-        appid = 'pyqt6.python.NathUI'
+        appid = 'pyqt5.python.ui'
         ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(appid)
 
         window = NathUI_MainBrowser()
