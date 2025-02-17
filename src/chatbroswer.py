@@ -3,7 +3,7 @@
 # Nath UI Project
 # DOF Studio/Nathmath all rights reserved
 # Open sourced under Apache 2.0 License
-import ctypes
+
 # It is a FREE and OPEN SOURCED software
 # See github.com/dof-studio/NathUI
 
@@ -11,11 +11,12 @@ import ctypes
 
 import os
 import sys
+import ctypes
 import urllib.parse
 
 # PyQt Libs
 from PyQt5.QtWidgets import (
-    QApplication, QMainWindow, QWidget, QTabWidget, QLabel, QPushButton,
+    QTabWidget, QLabel, QPushButton,
     QHBoxLayout, QVBoxLayout, QMessageBox, QInputDialog, QTableWidgetItem,
     QSpinBox, QColorDialog, QDoubleSpinBox, QLineEdit, QApplication, QGroupBox,
     QDialog, QVBoxLayout, QTableWidget, QTableWidgetItem, QMenu,
@@ -681,7 +682,7 @@ class DownloadManagerDialog(QDialog):
         row = self.table.rowCount()
         self.table.insertRow(row)
 
-        # 构造文件项并将完整文件路径保存在 UserRole 数据中
+        # Constructs a file item and saves the full file path in the UserRole data
         file_item = QTableWidgetItem(download_item.downloadFileName())
         download_path = QStandardPaths.writableLocation(QStandardPaths.DownloadLocation)
         file_path = os.path.join(download_path, download_item.downloadFileName())
@@ -1015,7 +1016,7 @@ class SettingsTab(QWidget):
         else:
             bg_css = "body { background-color: #ffffff; }"
 
-        # 保存新增设置为实例变量
+        # Save the newly added settings as instance variables
         self.model_selection = self.model_combo.currentText()
         self.temperature = self.temperature_spin.value()
         self.top_p = self.top_p_spin.value()
