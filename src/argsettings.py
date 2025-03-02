@@ -53,16 +53,17 @@ def nathui_param_settings(has_model: bool = True):
     # post-process
     # 1. nathmiddleware should not contain :
     if "nathui_backend_middleware_serve_address" in names:
-        values = (names["nathui_backend_middleware_serve_address"]).split(":")
+        original = user_inputs_dict["nathui_backend_middleware_serve_address"]
+        values = original.split(":")
         if len(values) == 1:
             pass
         elif len(values) == 2:
             if values[0] == "http" or values[0] == "https":
                 # values[0] is http/https
-                names["nathui_backend_middleware_serve_address"] = values[1]
+                user_inputs_dict["nathui_backend_middleware_serve_address"] = values[1]
             elif int(values[1]) > 0:
                 # values[1] is port
-                names["nathui_backend_middleware_serve_address"] = values[0]
+                user_inputs_dict["nathui_backend_middleware_serve_address"] = values[0]
         else:
             raise Exception("Invalid nath middleware url, do not add http or port number!")
     
