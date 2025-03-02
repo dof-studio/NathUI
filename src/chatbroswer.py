@@ -11,12 +11,14 @@
 
 import os
 import sys
+import pickle
 import ctypes
 import urllib.parse
+from flask import Flask, request, jsonify
 
 # PyQt Libs
 from PyQt5.QtWidgets import (
-    QTabWidget, QLabel, QPushButton,
+    QTabWidget, QLabel, QPushButton, QSlider,
     QHBoxLayout, QVBoxLayout, QMessageBox, QInputDialog, QTableWidgetItem,
     QSpinBox, QColorDialog, QDoubleSpinBox, QLineEdit, QApplication, QGroupBox,
     QDialog, QVBoxLayout, QTableWidget, QTableWidgetItem, QMenu,
@@ -36,10 +38,15 @@ from PyQt5.QtGui import QDesktopServices
 import debug
 import argsettings
 import params
-from chatloop import Chatloop
+import version
+from chatloop import Chatloop, model_list
 from dethink import think_output_split as tos
 from mkdown_convertor import convert_markdown_to_html as to_html
 from chatbrowser_theme import generate_stylesheet
+from threadpool import ThreadPool
+from strutil import str_unquote, str_demarkdown
+from strlang import is_english
+from kokoro_infer import AudioPlayer, KokoroTTS, kokoro_language_dict, kokoro_voicer_dict
 
 # Global Variables
 WINDOW_WIDTH = 1400
@@ -51,6 +58,19 @@ CHAT_ENABLE_MARKDOWN = True
 
 # Control Panels
 DEFAULT_CONTROL_TYPE = "Default"  # Means nothing
+
+# Flusk App
+flaskapp = Flask(__name__)
+flask_button_signals = []
+
+# Flusk - Functinal, Process Javasript button events
+@flaskapp.route('/button_clicked', methods=['POST'])
+def button_clicked():
+    data = request.get_json()
+    # Append the signal (e.g., action and index) to the list
+    flask_button_signals.append(data) 
+    print(f"Button clicked: {data}")  # For debugging
+    return jsonify({'status': 'success', 'data': data})
 
 
 # CustomWebEnginePage: Internal Webpage Engine
@@ -150,9 +170,11 @@ class SpecialControlPanel(QWidget):
             DEFAULT_CONTROL_TYPE,
             r"\quit",
             r"\delete",
-            r"\deletall",
+            r"\deleteall",
+            r"\toolcall",
             r"\visit",
             r"\search",
+            r"\locate",
             r"\connect",
             r"\insert",
             r"\update",
@@ -174,8 +196,19 @@ class SpecialControlPanel(QWidget):
 # input area height adjustment and special controls
 # It connects to the backend 
 class ChatWidget(QWidget):
-    def __init__(self, font_family=DEFAULT_FONT_FAMILY, font_size=DEFAULT_FONT_SIZE,
-                 extra_css=DEFAULT_EXTRA_CSS, enable_markdown=CHAT_ENABLE_MARKDOWN,
+    
+    def __init__(self, 
+                 font_family=DEFAULT_FONT_FAMILY, 
+                 font_size=DEFAULT_FONT_SIZE,
+                 extra_css=DEFAULT_EXTRA_CSS, 
+                 enable_markdown=CHAT_ENABLE_MARKDOWN,
+                 model=params.nathui_backend_model,
+                 temperature=1.0,
+                 top_p=0.95,
+                 max_tokens=8192,
+                 system_prompt="You are a helpful assistant.",
+                 kokoro_cn_voicer=kokoro_voicer_dict["z"][0],
+                 kokoro_en_voicer=kokoro_voicer_dict["a"][0],
                  parent=None):
 
         # Basic settings
@@ -184,6 +217,17 @@ class ChatWidget(QWidget):
         self.font_size = font_size
         self.extra_css = extra_css
         self.enable_markdown = enable_markdown
+        
+        # Advanced Inference settings
+        self.model = model
+        self.temperature = temperature
+        self.top_p = top_p
+        self.max_tokens = max_tokens
+        self.system_prompt = system_prompt
+        
+        # Voice settings
+        self.kokoro_cn_voicer = kokoro_cn_voicer
+        self.kokoro_en_voicer = kokoro_en_voicer
 
         # Sync or async
         self.sync = False
@@ -192,8 +236,15 @@ class ChatWidget(QWidget):
         self.sending_pending_reply = False
 
         # History of conversations
-        # Supports "User", "Assistant", "Control", "System" (Unprinted)
+        # Supports "User", "Assistant", "Control", DO NOT INCLUDE "System"
         self.conversation_turns = []
+        
+        # Audio TTS related threads and player
+        self.audios = []
+        self.player = AudioPlayer(self.audios, sample_rate=24000)
+        
+        self.player_isplaying = False
+        self.player_threadpool = ThreadPool(4)
 
         ###################################################
         # Connect to the backend Chatloop
@@ -203,7 +254,19 @@ class ChatWidget(QWidget):
         self.chatloop = Chatloop(use_external="No Renderer")
         # Note, in this class, chat history is still maintained as a copy
         # But when treating with the savings, we should save the backend and load to it as well
-
+        
+        
+        ###################################################
+        # 
+        # Load inference settings if exists
+        self.load_inference_settings()
+        
+        ###################################################
+        #
+        # Apply inference settings
+        # It must be here after chatloop has been initialized
+        self.apply_inference_setting()
+        
         # Chat history display area, using QWebEngineView to render inline editable HTML
         self.browser = QWebEngineView()
         self.browser.setMinimumHeight(400)
@@ -227,10 +290,17 @@ class ChatWidget(QWidget):
         panel_layout.setContentsMargins(0, 0, 0, 0)
         btn_layout = QHBoxLayout()
         self.send_button = QPushButton("发送")
+        self.regen_button = QPushButton("重新生成")
+        self.clear_lstrnd = QPushButton("回退一轮")
         self.clear_button = QPushButton("清空对话")
+        self.ttsread_button = QPushButton("语音朗读")
         self.toggle_control_button = QPushButton("特殊控制面板")
+        # add widget
         btn_layout.addWidget(self.send_button)
+        btn_layout.addWidget(self.regen_button)
+        btn_layout.addWidget(self.clear_lstrnd)
         btn_layout.addWidget(self.clear_button)
+        btn_layout.addWidget(self.ttsread_button)
         btn_layout.addWidget(self.toggle_control_button)
         self.special_control_panel = SpecialControlPanel()
         self.special_control_panel.setVisible(False)
@@ -254,9 +324,19 @@ class ChatWidget(QWidget):
 
         # Bind - When send triggered
         self.send_button.clicked.connect(self.process_sending)
+        
+        # Bind - When regenerate triggered
+        self.regen_textbuffer = {}
+        self.regen_button.clicked.connect(self.regenerate_response)
+        
+        # Bind - When clear lastround triggered
+        self.clear_lstrnd.clicked.connect(self.clear_lastround)
 
         # Bind - When clear triggered
         self.clear_button.clicked.connect(self.clear_conversation)
+        
+        # Bind - When ttsread triggered
+        self.ttsread_button.clicked.connect(self.ttsread_clicked)
 
         # Bind - When Special Control button is clicked
         self.toggle_control_button.clicked.connect(self.toggle_control_panel)
@@ -265,11 +345,79 @@ class ChatWidget(QWidget):
         self.special_control_panel.send_control_button.clicked.connect(self.process_control_input)
 
         self.update_conversation()
-
+        
         # Author Tag
         self.__author__ = "DOF-Studio/NathMath@bilibili"
         self.__license__ = "Apache License Version 2.0"
-
+        
+    # Export Data (static)
+    @staticmethod
+    def _export_data(data, filepath) -> bool:
+        try:
+            directory = os.path.dirname(filepath)
+            if directory:
+                os.makedirs(directory, exist_ok=True)
+            with open(filepath, 'wb') as f:
+                pickle.dump(data, f)
+            return True
+        except Exception as e:
+            return False
+        
+    # Import Data (static)
+    @staticmethod
+    def _import_data(filepath, default=None) -> any:
+        try:
+            with open(filepath, 'rb') as f:
+                return pickle.load(f)
+        except FileNotFoundError:
+            return default
+        except Exception as e:
+            return default   
+      
+    # Reload inference settings to the self
+    # Before chatting, you need to `apply` it 
+    # Only non-None variables will be set here
+    def reload_inference_setting(self,
+                                 model=None,
+                                 temperature=None,
+                                 top_p=None,
+                                 max_tokens=None,
+                                 system_prompt=None,
+                                 kokoro_cn_voicer=None,
+                                 kokoro_en_voicer=None):
+        if model:
+            self.model = model
+        if temperature:
+            self.temperature = temperature
+        if top_p:
+            self.top_p = top_p
+        if max_tokens:
+            self.max_tokens = max_tokens
+        if system_prompt:
+            self.system_prompt = system_prompt
+        if kokoro_cn_voicer:
+            self.kokoro_cn_voicer = kokoro_cn_voicer
+        if kokoro_en_voicer:
+            self.kokoro_en_voicer = kokoro_en_voicer
+        return
+    
+    # Apply inference settings to the backend
+    def apply_inference_setting(self):
+        
+        # To set the system_prompt
+        self.chatloop.system_prompt_set(self.system_prompt)
+        
+        # To update a new default mode
+        self.chatloop.reattach_new_model(new_model = self.model)
+        
+        # To the backend
+        inf_params = self.chatloop.infer_params_get()
+        inf_params["temperature"] = self.temperature
+        inf_params["max_tokens"] = self.max_tokens
+        inf_params["top_p"] = self.top_p
+        self.chatloop.infer_params_set(inf_params)
+        return None
+        
     # When send is clicked (communicate with backend to get responses)
     def process_sending(self):
 
@@ -278,13 +426,28 @@ class ChatWidget(QWidget):
         # Here, it actually connects to the backend and generate AI responses
         #
         ###################
-
-        # Try to paste remained control panel to test
-        self.process_control_input()
-
-        # Get total input
-        user_text = self.message_input.toPlainText().strip()
-        if not user_text:
+        
+        #### If triggered as a regenerate
+        user_text = ""
+        if len(self.regen_textbuffer) > 0:
+            # Paste here
+            user_text = self.regen_textbuffer["text"].strip()
+            # self.regen_textbuffer may have more things in the future
+            self.regen_textbuffer = {}            
+            
+        #### Triggered as input
+        else:
+            # Try to paste remained control panel to test
+            self.process_control_input()
+    
+            # Get total input
+            user_text = self.message_input.toPlainText().strip()
+            
+            # Clear after get
+            self.message_input.clear()
+        
+        # No text? back
+        if not user_text or len(user_text) == 0:
             return
 
         # If already sent, return
@@ -299,7 +462,6 @@ class ChatWidget(QWidget):
         #                                                 here we omit assitant
         #                                                 and will be added when responsed
         self.conversation_turns.append({"user": user_text, })
-        self.message_input.clear()
 
         # Update showing
         self.update_conversation()
@@ -325,6 +487,29 @@ class ChatWidget(QWidget):
 
             # Start a thread to generate a response asynchronously
             self.worker.start()
+
+    # When regenerate is clicked
+    def regenerate_response(self):
+        
+        # First get the last round of conversation
+        # If no round, return
+        if len(self.conversation_turns) == 0:
+            return
+        
+        else:
+            last_turn = self.conversation_turns[-1]
+            self.conversation_turns = self.conversation_turns[0:-1]
+            
+            # If no user, return
+            if last_turn.get("user", None) is None:
+                return
+            
+            # Backend clearing 
+            self.chatloop.clear_lastround()
+            
+            # Trigger process sending as the regenerate mode
+            self.regen_textbuffer["text"] = last_turn["user"]
+            self.process_sending()
 
     # When control send is clicked
     def process_control_input(self):
@@ -423,10 +608,14 @@ class ChatWidget(QWidget):
             chat_once_result = self.chatloop.api_chat_once(self.user_text, chat=True)
 
             # Process the latest response to extract thinking and output
-            thinking, output = tos(self.chatloop.responses[-1][1])
-
-            # Emit the final result so the GUI can update accordingly.
-            self.final_result_ready.emit(thinking, output, "")
+            try:
+                thinking, output = tos(self.chatloop.responses[-1][1])
+                # Emit the final result so the GUI can update accordingly.
+                self.final_result_ready.emit(thinking, output, "")
+                
+            except Exception as e:
+                print("Error in generating a response! " + str(e))
+                self.final_result_ready.emit(thinking, output, "")
 
     # NONBIND - To get the response from the backend (synchronizedly)
     # DEPRECATED
@@ -439,7 +628,11 @@ class ChatWidget(QWidget):
         placeholder = self.chatloop.api_chat_once(user_text)
 
         # Get the latest response
-        thinking, output = tos(self.chatloop.responses[-1][1])
+        try:
+            thinking, output = tos(self.chatloop.responses[-1][1])
+        except Exception as e:
+            print("Error in generating a response! " + str(e))
+            return "", "", ""
 
         return thinking, output, placeholder
 
@@ -483,6 +676,25 @@ class ChatWidget(QWidget):
         html += ".assistant { background-color: #e3f2fd; } "
         html += ".control { background-color: #fff9c4; } "
         html += ".editable:hover { border: 1px dashed #666; cursor: pointer; } "
+        html += """
+          .assistant-buttons button {
+            background-color: #e3f2fd;
+            border: none;
+            color: black;
+            padding: 8px 16px;
+            font-size: 14px;
+            margin: 4px 2px;
+            cursor: pointer;
+            border-radius: 4px;
+            transition: background-color 0.3s ease;
+          }
+          .assistant-buttons button:hover {
+            background-color: #fffffd;
+          }
+          .assistant-buttons {
+            margin-top: 8px;
+          }
+        """
         html += "</style>"
         html += "<script src='qrc:///qtwebchannel/qwebchannel.js'></script>"
         # Javascript
@@ -506,12 +718,54 @@ class ChatWidget(QWidget):
             }
         }
         window.addEventListener('DOMContentLoaded', (event) => {
-            var editables = document.getElementsByClassName('editable');
-            for (var i = 0; i < editables.length; i++) {
-                editables[i].ondblclick = function() { enableEditing(this); };
-                editables[i].onblur = function() { disableEditing(this); };
-            }
+          // Attach event listeners to editable elements.
+          var editables = document.getElementsByClassName('editable');
+          for (var i = 0; i < editables.length; i++) {
+              editables[i].addEventListener('dblclick', function(e) {
+                  // Prevent enabling editing if a button inside the editable is clicked.
+                  if(e.target.tagName !== 'BUTTON') {
+                      enableEditing(this);
+                  }
+              });
+              editables[i].addEventListener('blur', function(e) {
+                  disableEditing(this);
+              });
+          }
+        
+        document.addEventListener('DOMContentLoaded', function() {
+          // Attach click event listeners for Regenerate buttons.
+          document.querySelectorAll('.regenerate-button').forEach(function(btn) {
+              btn.addEventListener('click', function(e) {
+                  e.stopPropagation(); // Prevent event bubbling.
+                  let index = this.getAttribute('data-index');
+                  fetch('/button_clicked', {
+                      method: 'POST',
+                      headers: {'Content-Type': 'application/json'},
+                      body: JSON.stringify({action: 'regenerate', index: index})
+                  })
+                  .then(response => response.json())
+                  .then(data => console.log('Response:', data))
+                  .catch(error => console.error('Error:', error));
+              });
+          });
+        
+          // Attach click event listeners for TTS buttons.
+          document.querySelectorAll('.TTS-button').forEach(function(btn) {
+              btn.addEventListener('click', function(e) {
+                  e.stopPropagation(); // Prevent event bubbling.
+                  let index = this.getAttribute('data-index');
+                  fetch('/button_clicked', {
+                      method: 'POST',
+                      headers: {'Content-Type': 'application/json'},
+                      body: JSON.stringify({action: 'TTS', index: index})
+                  })
+                  .then(response => response.json())
+                  .then(data => console.log('Response:', data))
+                  .catch(error => console.error('Error:', error));
+              });
+          });
         });
+
         </script>
         """
         html += "</head><body>"
@@ -541,8 +795,19 @@ class ChatWidget(QWidget):
                                              "")
                 else:
                     assistant_html = turn["assistant"].replace("\n", "<br>")
-                html += f"<div class='message assistant editable' data-index='{i}' data-role='assistant'><strong>Assistant:</strong><br>{assistant_html}</div>"
-
+                html += f"""<div class='message assistant editable' data-index='{i}' data-role='assistant'><strong>Assistant:</strong><br>{assistant_html}</div>"""
+                
+                # @todo
+                # I haven't solved the issue of receving the signal of these buttons
+                # So use a gereral button for regenerate and TTS
+                # 
+                # Add buttons for assistant messages
+                # html += f"""
+                #  <div class='assistant-buttons' data-index='{i}'>
+                #    <button class='regenerate-button' data-index='{i}'>Regenerate</button>
+                #    <button class='TTS-button' data-index='{i}'>TTS</button>
+                #  </div>"""
+                
             # Directly Assistant Html text
             if "assistant_html" in turn:
                 # Always disable markdown
@@ -560,7 +825,8 @@ class ChatWidget(QWidget):
                     control_html = turn["control"].replace("\n", "<br>")
                 html += f"<div class='message control editable' data-index='{i}' data-role='control'><strong>Control [{turn.get('control_type', '')}] :</strong><br>{control_html}</div>"
 
-            # Ignore system
+            # We do not have system here
+            # It will be set to the backend directly
             if "system" in turn:
                 pass
 
@@ -578,7 +844,7 @@ class ChatWidget(QWidget):
 
         html += "</body></html>"
         return html
-
+    
     # Update conversation turns api
     def update_message(self, index, role, new_text):
         try:
@@ -592,6 +858,22 @@ class ChatWidget(QWidget):
         self.extra_css = background_css
         self.update_conversation()
 
+    # When clear lastround is clicked
+    def clear_lastround(self):
+        
+        # First see if we have last round of conversation
+        # If no round, return
+        if len(self.conversation_turns) == 0:
+            return
+        else:
+            # Frontend clearing 
+            self.conversation_turns = self.conversation_turns[0:-1]
+            self.update_conversation()
+            # Add system prompt in the future
+
+            # Backend clearing 
+            self.chatloop.clear_lastround()
+
     # When clear conversion is clicked
     def clear_conversation(self):
 
@@ -603,6 +885,138 @@ class ChatWidget(QWidget):
         # Backend clearing 
         self.chatloop.clear_messages()
 
+    # Generate text to audio thread function
+    @staticmethod
+    def try_generate(player: AudioPlayer, audios, sample_text, cn_voicer, en_voicer):    
+        
+        # De-markdown
+        sample_text = str_demarkdown(sample_text)
+        
+        # Identify English or Chinese
+        ratio, is_eng = is_english(sample_text)
+        if is_eng:
+            lang = "a"
+            voicer = en_voicer
+        else:
+            lang = "z"
+            voicer = cn_voicer
+
+        # Generate audio
+        tts_engine = KokoroTTS(lang_code=lang,
+                               voice=voicer, 
+                               speed=1.1, 
+                               split_pattern=r'(?:\n+|[.。；;!！]+)', 
+                               sample_rate=24000, 
+                               display_audio=False, 
+                               save_to_file=False, 
+                               output_dir='__kokoro_audio__')
+        
+        # Generate and process audio segments in realtime.
+        for segment_index, (graphemes, phonemes, audio) in enumerate(tts_engine.synthesize(sample_text)):
+            audios.append(audio)
+            # print(f"Segment {segment_index}")
+            # print("Text:", graphemes)
+            # print("Phonemes:", phonemes)
+            
+        # Finale
+        player.finale()
+        
+        # Wait until stop
+        player.wait_until_stop()
+            
+        return player
+
+    # When tts read clicked (start or stop)
+    def ttsread_clicked(self):
+        # No conversation or last no assistant
+        if len(self.conversation_turns) == 0:
+            return
+        if self.conversation_turns[-1].get("assistant", None) is None:
+            return
+        
+        if self.player_isplaying == False:
+            
+            # Clear audios
+            self.audios = []
+            self.player.rebind(self.audios)
+            
+            # Create and start the realtime audio player.
+            self.player.start()
+            
+            # Get last generated assistant
+            last_generated = self.conversation_turns[-1]["assistant"]
+            
+            # Start to play
+            self.player_threadpool.execute(self.try_generate,
+                           player = self.player, 
+                           audios = self.audios, 
+                           sample_text = last_generated,
+                           cn_voicer = self.kokoro_cn_voicer,
+                           en_voicer = self.kokoro_en_voicer)
+            
+            self.player_isplaying = True
+            
+        else:
+            # If aleady stopped
+            if self.player.current_index == 0 and self.player.max_index == 100**10:
+                self.player.stop()
+                self.player_threadpool.stopall()
+                self.player_isplaying = False
+                # Regenerate audio
+                self.ttsread_clicked()
+                
+            else:
+                # Stop from player to threadpool
+                self.player.stop()
+                self.player_threadpool.stopall()
+                
+                self.player_isplaying = False
+        
+    # Save Inference Settings
+    def save_inference_settings(self, file_path = None):
+        # Default place
+        if file_path is None:
+            file_path = params.nathui_backend_config_folder + "inference.config"
+            
+        # Dict
+        inference_settings = {
+            
+            "~attr~": "inference_settings",
+        
+            "params": {
+                # Advanced Inference settings
+                "model" : self.model,
+                "temperature" : self.temperature,
+                "top_p" : self.top_p,
+                "max_tokens" : self.max_tokens,
+                "system_prompt": self.system_prompt,
+                
+                # Voice settings
+                "kokoro_cn_voicer" : self.kokoro_cn_voicer,
+                "kokoro_en_voicer" : self.kokoro_en_voicer,
+                }
+        }
+        
+        self._export_data(inference_settings, file_path)
+        
+    # Load Inference Settings
+    def load_inference_settings(self, file_path = None):
+        # Default place
+        if file_path is None:
+            file_path = params.nathui_backend_config_folder + "inference.config"
+        
+        # Not exists, pass
+        if os.path.exists(file_path) == False:
+            return
+            
+        inference_settings = self._import_data(file_path)
+        # Attr check
+        if inference_settings.get("~attr~", None) != "inference_settings":
+            return
+        
+        self.reload_inference_setting(**inference_settings["params"])
+        self.apply_inference_setting()
+        
     # Save ft-bk history to file
     def save_conversation(self, file_path):
         try:
@@ -877,6 +1291,10 @@ class WebSearchWidget(QWidget):
 
 # Interface of settings
 class SettingsTab(QWidget):
+    
+    # Selected settings
+    # Which is a signal that will be captured by the main widge
+    # to apply the actual settings and inference settings
     settingsApplied = pyqtSignal(dict)
 
     def __init__(self, current_theme="Light", current_bg_css="body { background-color: #ffffff; }",
@@ -905,29 +1323,69 @@ class SettingsTab(QWidget):
         self.font_size_spin.setRange(12, 48)
         self.font_size_spin.setValue(self.current_font_size)
 
+        ########################
+        #
         # Inference settings: model selection, temperature, top p, system prompt words
         self.model_label = QLabel("模型选择:")
         self.model_combo = QComboBox()
-        self.model_combo.addItems(["Default-Reserved for future use"])  # 示例模型选项
-        self.model_combo.setCurrentIndex(0)
-
+        self.reload_all_models()
+        
+        # Temperature
         self.temperature_label = QLabel("温度:")
         self.temperature_spin = QDoubleSpinBox()
         self.temperature_spin.setRange(0.0, 2.0)
         self.temperature_spin.setSingleStep(0.1)
         self.temperature_spin.setValue(1.0)
-
+        
+        # Top p parameters
         self.top_p_label = QLabel("Top p:")
         self.top_p_spin = QDoubleSpinBox()
         self.top_p_spin.setRange(0.0, 1.0)
-        self.top_p_spin.setSingleStep(0.05)
-        self.top_p_spin.setValue(1.0)
+        self.top_p_spin.setSingleStep(0.01)
+        self.top_p_spin.setValue(0.95)
+        
+        # Max Tokens
+        self.max_tokens_label = QLabel("Max Tokens:")
+        self.max_tokens_slider = QSlider(Qt.Horizontal)
+        self.max_tokens_slider.setRange(128, 32768)
+        self.max_tokens_slider.setSingleStep(128)
+        self.max_tokens_slider.setValue(4096)
+        self.max_tokens_slider.setMinimumWidth(600)
+        self.max_tokens_slider.setMaximumWidth(900)
+        
 
+        # Create a spin box to display the value
+        self.max_tokens_spin = QSpinBox()
+        self.max_tokens_spin.setRange(128, 32768)
+        self.max_tokens_spin.setValue(4096)
+        self.max_tokens_spin.setMaximumWidth(100)
+        # Connect the slider and spin box so that a change in one updates the other
+        self.max_tokens_slider.valueChanged.connect(self.max_tokens_spin.setValue)
+        self.max_tokens_spin.valueChanged.connect(self.max_tokens_slider.setValue)
+        
+        # Kokoro CN Voicer
+        self.kokoro_cn_label = QLabel("TTS中文声优:")
+        self.kokoro_cn_combo = QComboBox()
+        
+        # Kokoro EN Voicer
+        self.kokoro_en_label = QLabel("TTS英文声优:")
+        self.kokoro_en_combo = QComboBox()
+        
+        # System Prompt
         self.system_prompt_label = QLabel("系统提示词:")
-        self.system_prompt_input = QLineEdit()
+        self.system_prompt_input = QTextEdit()
+        self.system_prompt_input.setFixedHeight(120)
+        
+        # Load all voicers to add to combos
+        self.reload_all_voicers()
+        
+        # Load all inference parameters if exists
+        self.load_inference_settings()
 
         self.apply_button = QPushButton("应用设置")
 
+        ########################
+        #
         # Main layout
         main_layout = QVBoxLayout()
 
@@ -952,7 +1410,9 @@ class SettingsTab(QWidget):
         layout_size.addWidget(self.font_size_label)
         layout_size.addWidget(self.font_size_spin)
         basic_layout.addLayout(layout_size)
-
+        
+        ###### Inf Group
+        # 
         # Inference Settings
         advanced_group = QGroupBox("推理设置")
         advanced_layout = QVBoxLayout()
@@ -971,25 +1431,130 @@ class SettingsTab(QWidget):
         layout_top_p.addWidget(self.top_p_label)
         layout_top_p.addWidget(self.top_p_spin)
         advanced_layout.addLayout(layout_top_p)
+        
+        layout_max_tokens = QHBoxLayout()
+        layout_max_tokens.addWidget(self.max_tokens_label)
+        layout_max_tokens.addWidget(self.max_tokens_slider)
+        layout_max_tokens.addWidget(self.max_tokens_spin)
+        advanced_layout.addLayout(layout_max_tokens)
 
+        kokoro_cn_prompt = QHBoxLayout()
+        kokoro_cn_prompt.addWidget(self.kokoro_cn_label)
+        kokoro_cn_prompt.addWidget(self.kokoro_cn_combo)
+        advanced_layout.addLayout(kokoro_cn_prompt)
+        
+        kokoro_en_prompt = QHBoxLayout()
+        kokoro_en_prompt.addWidget(self.kokoro_en_label)
+        kokoro_en_prompt.addWidget(self.kokoro_en_combo)
+        advanced_layout.addLayout(kokoro_en_prompt)
+        
         layout_prompt = QHBoxLayout()
         layout_prompt.addWidget(self.system_prompt_label)
         layout_prompt.addWidget(self.system_prompt_input)
         advanced_layout.addLayout(layout_prompt)
-
+        
+        # Set group
         advanced_group.setLayout(advanced_layout)
-
+        
+        ############
+        #
         # Combine all layouts into a main layout
         main_layout.addLayout(basic_layout)
         main_layout.addWidget(advanced_group)
         main_layout.addWidget(self.apply_button)
 
         self.setLayout(main_layout)
-
+        
+        ########################
+        #
         # Signal Connection
         self.bg_color_button.clicked.connect(self.choose_bg_color)
         self.apply_button.clicked.connect(self.on_apply)
-
+        
+    # Export Data (static)
+    @staticmethod
+    def _export_data(data, filepath) -> bool:
+        try:
+            directory = os.path.dirname(filepath)
+            if directory:
+                os.makedirs(directory, exist_ok=True)
+            with open(filepath, 'wb') as f:
+                pickle.dump(data, f)
+            return True
+        except Exception as e:
+            return False
+        
+    # Import Data (static)
+    @staticmethod
+    def _import_data(filepath, default=None) -> any:
+        try:
+            with open(filepath, 'rb') as f:
+                return pickle.load(f)
+        except FileNotFoundError:
+            return default
+        except Exception as e:
+            return default   
+      
+    # Load Inference Settings from filepath
+    def load_inference_settings(self, file_path = None):
+        # Default place
+        if file_path is None:
+            file_path = params.nathui_backend_config_folder + "inference.config"
+        
+        # Not exists, pass
+        if os.path.exists(file_path) == False:
+            print("Warning: inference setting does not exist. Using default...")
+            return
+            
+        inference_settings = self._import_data(file_path)
+        # Attr check
+        if inference_settings.get("~attr~", None) != "inference_settings":
+            return
+        
+        # Load model
+        model = inference_settings["params"]["model"]
+        if model in model_list():
+            self.model_combo.setCurrentText(model)
+            
+        # Load temperature
+        temperature = inference_settings["params"]["temperature"]
+        self.temperature_spin.setValue(temperature)
+        
+        # Load top_p
+        top_p = inference_settings["params"]["top_p"]
+        self.top_p_spin.setValue(top_p)
+        
+        # Load max_tokens
+        max_tokens = inference_settings["params"]["max_tokens"]
+        self.max_tokens_spin.setValue(max_tokens)
+        
+        # Load system prompt
+        system_prompt = inference_settings["params"]["system_prompt"]
+        self.system_prompt_input.setText(system_prompt)
+        
+        # Load kokoro voicers
+        kokoro_cn = inference_settings["params"]["kokoro_cn_voicer"]
+        kokoro_en = inference_settings["params"]["kokoro_en_voicer"]
+        self.kokoro_cn_combo.setCurrentText(kokoro_cn)
+        self.kokoro_en_combo.setCurrentText(kokoro_en)
+        return
+      
+    # Reload all voicers to add to combos
+    def reload_all_voicers(self):
+        cn_voicers = kokoro_voicer_dict["z"]
+        en_voicers = kokoro_voicer_dict["a"]
+        self.kokoro_cn_combo.addItems(cn_voicers)
+        self.kokoro_cn_combo.setCurrentIndex(0)
+        self.kokoro_en_combo.addItems(en_voicers)
+        self.kokoro_en_combo.setCurrentIndex(0)
+        
+    # Reload all models
+    def reload_all_models(self):
+        models = model_list()
+        models.sort()
+        self.model_combo.addItems(models)
+        self.model_combo.setCurrentIndex(0)
+        
     # Choose backgournd colors
     def choose_bg_color(self):
         color = QColorDialog.getColor()
@@ -1003,10 +1568,21 @@ class SettingsTab(QWidget):
         self.settingsApplied.emit(settings)
 
     # Return all settings in a dict
-    def get_settings(self):
+    def get_settings(self) -> dict:
+        
+        settings = {}
+        
+        # Theme
         theme = self.theme_combo.currentText()
+        settings["theme"] = theme
+        
+        # Font related
         font_family = self.font_combo.currentFont().family()
         font_size = self.font_size_spin.value()
+        settings["font_family"] = font_family
+        settings["font_size"] = font_size
+        
+        # Css
         if theme == "Light":
             bg_css = "body { background-color: #ffffff; color: #000000; }"
         elif theme == "Dark":
@@ -1015,23 +1591,36 @@ class SettingsTab(QWidget):
             bg_css = self.current_bg_css if self.current_bg_css else "body { background-color: #ffffff; }"
         else:
             bg_css = "body { background-color: #ffffff; }"
-
-        # Save the newly added settings as instance variables
-        self.model_selection = self.model_combo.currentText()
-        self.temperature = self.temperature_spin.value()
-        self.top_p = self.top_p_spin.value()
-        self.system_prompt = self.system_prompt_input.text()
-
-        settings = {
-            "theme": theme,
-            "font_family": font_family,
-            "font_size": font_size,
-            "bg_css": bg_css,
-            "model_selection": self.model_selection,
-            "temperature": self.temperature,
-            "top_p": self.top_p,
-            "system_prompt": self.system_prompt
-        }
+        settings["bg_css"] = bg_css
+            
+        # Model Selected
+        model_selected = self.model_combo.currentText()
+        settings["model_selected"] = model_selected
+        
+        # Temperature
+        temperature = self.temperature_spin.value()
+        settings["temperature"] = temperature
+        
+        # Top p
+        top_p = self.top_p_spin.value()
+        settings["top_p"] = top_p
+        
+        # Max tokens
+        max_tokens = self.max_tokens_spin.value()
+        settings["max_tokens"] = max_tokens
+        
+        # kokoro_cn
+        kokoro_cn = self.kokoro_cn_combo.currentText()
+        settings["kokoro_cn"] = kokoro_cn
+        
+        # kokoro_en
+        kokoro_en = self.kokoro_en_combo.currentText()
+        settings["kokoro_en"] = kokoro_en
+        
+        # system_prompt
+        system_prompt = self.system_prompt_input.toPlainText()
+        settings["system_prompt"] = system_prompt
+        
         return settings
 
 
@@ -1091,28 +1680,123 @@ class NathUI_MainBrowser(MyQMainWindow):
         super().__init__()
 
         # Nath UI @by NathMath
-        self.setWindowTitle("Nath UI")
+        self.setWindowTitle("Nath UI"  + " v" + version.nathui_version)
         # self.setGeometry(100, 100, WINDOW_WIDTH, WINDOW_HEIGHT) # instead of self.center_window
 
-        # Global Initialized Settings
+        # Global Initialized Theme
         self.current_theme = "Light"
         self.font_family = DEFAULT_FONT_FAMILY
         self.font_size = DEFAULT_FONT_SIZE
         self.background_css = "body { background-color: #ffffff; }"
-
+        
+        # Global Initialized Inference Settings
+        self.model_selected = params.nathui_backend_model
+        self.temperature = 1.0
+        self.top_p = 0.95
+        self.max_tokens = 4096
+        self.kokoro_cn = kokoro_voicer_dict["z"][0]
+        self.kokoro_en = kokoro_voicer_dict["a"][0]
+        if debug.nathui_global_lang == "CN":
+            self.system_prompt = params.nathui_backend_default_sysprompt_CN
+        else:
+            self.system_prompt = params.nathui_backend_default_sysprompt_EN
+            
+        # Tabs
         self.tabs = QTabWidget()
         self.tabs.setTabsClosable(True)
         self.tabs.tabCloseRequested.connect(self.close_tab)
         self.tabs.tabBarDoubleClicked.connect(self.rename_tab)
         self.setCentralWidget(self.tabs)
 
+        # Status Bar
         self.statusBar().showMessage("Ready")
+        
+        # Apply settings
+        self.load_inference_settings()
+        self.apply_settings(None)
 
         self.create_new_chat_tab()
         self.create_toolbar()
         self.create_menus()
         self.update_main_style()
 
+    # Export Data (static)
+    @staticmethod
+    def _export_data(data, filepath) -> bool:
+        try:
+            directory = os.path.dirname(filepath)
+            if directory:
+                os.makedirs(directory, exist_ok=True)
+            with open(filepath, 'wb') as f:
+                pickle.dump(data, f)
+            return True
+        except Exception as e:
+            return False
+        
+    # Import Data (static)
+    @staticmethod
+    def _import_data(filepath, default=None) -> any:
+        try:
+            with open(filepath, 'rb') as f:
+                return pickle.load(f)
+        except FileNotFoundError:
+            return default
+        except Exception as e:
+            return default   
+      
+    # Save Inference Settings
+    def save_inference_settings(self, file_path = None):
+        # Default place
+        if file_path is None:
+            file_path = params.nathui_backend_config_folder + "inference.config"
+            
+        # Dict
+        inference_settings = {
+            
+            "~attr~": "inference_settings",
+        
+            "params": {
+                # Advanced Inference settings
+                "model" : self.model_selected,
+                "temperature" : self.temperature,
+                "top_p" : self.top_p,
+                "max_tokens" : self.max_tokens,
+                "system_prompt": self.system_prompt,
+                
+                # Voice settings
+                "kokoro_cn_voicer" : self.kokoro_cn,
+                "kokoro_en_voicer" : self.kokoro_en,
+                }
+        }
+        
+        self._export_data(inference_settings, file_path)
+        
+    # Load Inference Settings
+    def load_inference_settings(self, file_path = None):
+        # Default place
+        if file_path is None:
+            file_path = params.nathui_backend_config_folder + "inference.config"
+        
+        # Not exists, pass
+        if os.path.exists(file_path) == False:
+            print("Warning: inference setting does not exist. Using default...")
+            return
+            
+        inference_settings = self._import_data(file_path)
+        # Attr check
+        if inference_settings.get("~attr~", None) != "inference_settings":
+            return
+        
+        # Load
+        self.model_selected = inference_settings["params"]["model"]
+        self.temperature = inference_settings["params"]["temperature"]
+        self.top_p = inference_settings["params"]["top_p"]
+        self.max_tokens = inference_settings["params"]["max_tokens"]
+        self.system_prompt = inference_settings["params"]["system_prompt"]
+        self.kokoro_cn = inference_settings["params"]["kokoro_cn_voicer"]
+        self.kokoro_en = inference_settings["params"]["kokoro_en_voicer"]
+        return
+      
     # Form-creation Function: create a toolbar
     def create_toolbar(self):
         toolbar = QToolBar("Main Toolbar")
@@ -1214,14 +1898,14 @@ class NathUI_MainBrowser(MyQMainWindow):
         chat_widget = ChatWidget(font_family=self.font_family,
                                  font_size=self.font_size,
                                  extra_css=self.background_css)
-        tab_index = self.tabs.addTab(chat_widget, f"Chat {self.tabs.count() + 1}")
+        tab_index = self.tabs.addTab(chat_widget, f"聊天 {self.tabs.count() + 1}")
         self.tabs.setCurrentIndex(tab_index)
         return tab_index
 
     # Click - Form-creation Function: create a new web tab
     def create_web_search_tab(self) -> int:
         web_search_widget = WebSearchWidget()
-        tab_index = self.tabs.addTab(web_search_widget, f"Web {self.tabs.count() + 1}")
+        tab_index = self.tabs.addTab(web_search_widget, f"冲浪 {self.tabs.count() + 1}")
         self.tabs.setCurrentIndex(tab_index)
         return tab_index
 
@@ -1234,7 +1918,7 @@ class NathUI_MainBrowser(MyQMainWindow):
             current_font_size=self.font_size
         )
         settings_tab.settingsApplied.connect(self.apply_settings)
-        tab_index = self.tabs.addTab(settings_tab, "Settings")
+        tab_index = self.tabs.addTab(settings_tab, "设置")
         self.tabs.setCurrentIndex(tab_index)
         return tab_index
 
@@ -1259,7 +1943,7 @@ class NathUI_MainBrowser(MyQMainWindow):
             self.tabs.setTabText(index, new_name.strip())
         return index
 
-    # ??
+    # Clisk - Get current chat widget (used by kernel functions)
     def get_current_chat_widget(self):
         current_widget = self.tabs.currentWidget()
         if isinstance(current_widget, ChatWidget):
@@ -1268,6 +1952,7 @@ class NathUI_MainBrowser(MyQMainWindow):
 
     # Click - Save one chat into disk
     def save_current_chat(self):
+        # Save chat
         current_chat = self.get_current_chat_widget()
         if current_chat:
             file_path, _ = QFileDialog.getSaveFileName(self, "保存聊天历史", "", "NathUI Files (*.nath);;All Files (*)")
@@ -1285,7 +1970,7 @@ class NathUI_MainBrowser(MyQMainWindow):
                                      extra_css=self.background_css)
             # Internal Chat tab calling
             if chat_widget.load_conversation(file_path):
-                tab_index = self.tabs.addTab(chat_widget, f"Chat {self.tabs.count() + 1}")
+                tab_index = self.tabs.addTab(chat_widget, f"聊天 {self.tabs.count() + 1}")
                 self.tabs.setCurrentIndex(tab_index)
                 self.statusBar().showMessage("聊天记录导入成功。", 5000)
 
@@ -1311,12 +1996,26 @@ class NathUI_MainBrowser(MyQMainWindow):
         self.load_general_webpage(params.nathui_official_bilibili_website)
 
     # Click - Apply settings
-    def apply_settings(self, settings):
-        self.current_theme = settings["theme"]
-        self.font_family = settings["font_family"]
-        self.font_size = settings["font_size"]
-        self.background_css = settings["bg_css"]
-
+    def apply_settings(self, settings = None):
+        
+        if settings is not None:
+            
+            # Theme
+            self.current_theme = settings["theme"]
+            self.font_family = settings["font_family"]
+            self.font_size = settings["font_size"]
+            self.background_css = settings["bg_css"]
+            
+            # Inference
+            self.model_selected = settings["model_selected"]
+            self.temperature = settings["temperature"]
+            self.top_p = settings["top_p"]
+            self.max_tokens = settings["max_tokens"]
+            self.kokoro_cn = settings["kokoro_cn"]
+            self.kokoro_en = settings["kokoro_en"]
+            self.system_prompt = settings["system_prompt"]
+        
+        # Apply theme to everything
         for i in range(self.tabs.count()):
             widget = self.tabs.widget(i)
             if isinstance(widget, ChatWidget):
@@ -1324,6 +2023,25 @@ class NathUI_MainBrowser(MyQMainWindow):
                 widget.font_size = self.font_size
                 widget.set_background(self.background_css)
                 widget.update_conversation()
+        
+        # Apply inference to all chats
+        for i in range(self.tabs.count()):
+            widget = self.tabs.widget(i)
+            if isinstance(widget, ChatWidget):
+                widget.reload_inference_setting(
+                                 model=self.model_selected,
+                                 temperature=self.temperature,
+                                 top_p=self.top_p,
+                                 max_tokens=self.max_tokens,
+                                 system_prompt=self.system_prompt,
+                                 kokoro_cn_voicer=self.kokoro_cn,
+                                 kokoro_en_voicer=self.kokoro_en
+                    )
+                widget.apply_inference_setting()
+                
+        # Save settings
+        self.save_inference_settings()
+                
         self.update_main_style()
         self.statusBar().showMessage("设置应用成功。", 5000)
 
@@ -1341,10 +2059,13 @@ def main():
         ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(appid)
 
         window = NathUI_MainBrowser()
+        # show icon
         window.setWindowIcon(QIcon("__static__/icon.png"))
         window.show()
         sys.exit(app.exec_())
-    except:
+        
+    except Exception as e:
+        print("Main Chatbrower.py Error: " + str(e))
         pass
 
 

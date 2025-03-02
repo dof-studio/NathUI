@@ -536,7 +536,7 @@ if __name__ == "__main__":
     import uvicorn
     uvicorn.run(
         app,
-        host="localhost",
+        host=params.nathui_backend_middleware_serve_address,
         port=Config.MIDDLEWARE_PORT,
         timeout_keep_alive=10,
         log_level="info",

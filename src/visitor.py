@@ -310,7 +310,6 @@ class Deriv_WordFileReader(Base_FileVisitor):
         """
         return text.replace('\n', '  \n')
 
-
 # Deriv class: pdf document
 class Deriv_PdfFileReader(Base_FileVisitor):
     """
@@ -373,42 +372,49 @@ def file_visitor(file_path: str, as_markdown: bool = False, noexcept: bool = Tru
         else:
             raise FileReaderError(str(e))
             
-# API: Is File
+# API: Is File (Url, Folder, ...)
 def is_file(anything: str) -> int:
     """
     See whether a string contains a file or an url
-    Return 0(nonexist file), 1(existing file), 2(url), -1(others)
+    Return 0(nonexist file), 1(existing file), 2(url), 3(existing folder), -1(others)
     """
     s = anything.strip()
     parsed = urlparse(s)
     scheme = parsed.scheme.lower()
     
     # Constant defines
-    _nfile =  0
-    _file  =  1
-    _url   =  2
-    _other = -1
+    _nfile   =  0
+    _file    =  1
+    _url     =  2
+    _folder  =  3
+    _other   = -1
 
     if scheme:
-        # If there is a scheme, decide based on its type.
         if scheme == 'file':
             # For file URLs, convert the URL path to a local file path.
-            # Note: This may need more careful handling on Windows.
             path = unquote(parsed.path)
             if os.name == 'nt':
-                # On Windows the path might start with a leading slash; remove it.
+                # On Windows, remove a leading slash if it precedes a drive letter.
                 if path.startswith('/') and len(path) > 1 and path[2] == ':':
                     path = path.lstrip('/')
-            return _file if os.path.exists(path) else _nfile
+            if os.path.exists(path):
+                return _folder if os.path.isdir(path) else _file
+            else:
+                return _nfile
         elif scheme in ('http', 'https', 'ftp', 'udp'):
             return _url
         else:
-            # No valid scheme provided. Assume it's a local file path.
-            return _file if os.path.exists(s) else _other
-        
+            # Unknown scheme; treat as local path.
+            if os.path.exists(s):
+                return _folder if os.path.isdir(s) else _file
+            else:
+                return _other
     else:
-        # No scheme provided. Assume it's a local file path.
-        return _file if os.path.exists(s) else _other
+        # No scheme provided; assume it's a local file path.
+        if os.path.exists(s):
+            return _folder if os.path.isdir(s) else _file
+        else:
+            return _other
 
 
 # Test

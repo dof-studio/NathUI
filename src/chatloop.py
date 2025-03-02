@@ -21,7 +21,7 @@ import urllib.parse
 import urllib.request
 
 from openai import OpenAI
-from typing import Any, Dict, Optional
+from typing import Any, List, Dict, Optional
 
 import debug
 import params
@@ -29,19 +29,27 @@ from buffer import Buffer
 from strutil import str_unquote
 from search_engine import WebCrawler
 from visitor import is_file, file_visitor
+from filewalker import FileWalker
 from mkdown_renderer import go_renderer
 from sqlite import SQLiteClient, QueryExecutionError
 from sqparse import SQLiteParser
 from dethink import think_output_split as tos
 from debug import nathui_global_debug, nathui_global_lang
+from func_defaults import WEB_SEARCH_TOOL, web_search_on_internet
+from func_defaults import DATA_VISITOR_TOOL, data_visitor_online_or_local
+from func_defaults import FILE_OPENER_TOOL, local_file_opener
+from func_defaults import PYTHON_EXECTUTE_TOOL, python_code_executor
 
 # Legacy definition, will be removed in the future
 messages = []
 responses = []
 
-# Legacy Function provided by LMS
-def fetch_wikipedia_content(search_query: str) -> dict:
-    """Fetches wikipedia content for a given search_query"""
+# Legacy Function to search on wikipedia
+def fetch_wikipedia_content(search_query:str) -> dict:
+    """
+    Fetches wikipedia content for a given search_query
+    """
+    
     try:
         # Search for most relevant article
         search_url = "https://en.wikipedia.org/w/api.php"
@@ -98,17 +106,17 @@ def fetch_wikipedia_content(search_query: str) -> dict:
         }
 
     except Exception as e:
-        return {"status": "error", "message": str(e)}
+        return {"status": "error", "message": "Wiki searching error: " + str(e)}
 
 
-# Define tool for LM Studio
+# Template wiki tool
 WIKI_TOOL = {
     "type": "function",
     "function": {
         "name": "fetch_wikipedia_content",
         "description": (
             "Search Wikipedia and fetch the introduction of the most relevant article. "
-            "Always use this if the user is asking for something that is likely on wikipedia. "
+            "Always use this if the user is asking explicitly for searching on wikipedia. "
             "If the user has a typo in their search query, correct it before searching."
         ),
         "parameters": {
@@ -194,15 +202,55 @@ class Chatloop:
         else:
             system_prompt = params.nathui_backend_default_sysprompt_EN
         
-        # Construct everything
+        # Ongoing chat
         self.ongoing = False
+        
+        # Construct modelling
         self.model = params.nathui_backend_model
         self.client = OpenAI(base_url = params.nathui_backend_url + "/v1", 
                         api_key = params.nathui_backend_apikey)
-        self.webcrawler = webcrawler
+        
+        # System prompt
         self.system_prompt = system_prompt
+        
+        # Inference Params
+        self.infer_param = {
+                "temperature": 0.5,
+                "max_tokens": 4096,
+                "top_p": 0.95,
+                "frequency_penalty": 0,
+                "presence_penalty": 0
+                }
+        
+        # Generating with tool calls or not
+        self.use_tools = False
+        
+        # Supported tools
+        # Can be customized and appended by calling 
+        # self.append_supported_tools
+        self.tools = [
+            WEB_SEARCH_TOOL, # Official tool NathUI supports
+                             # search on the internet to get realtime data (non-cached)
+            DATA_VISITOR_TOOL, # Official tool NathUI supports
+                               # visit an online or local address to fetch data
+            FILE_OPENER_TOOL,  # Official tool NathUI supports
+                               # open a local file by its path
+            PYTHON_EXECTUTE_TOOL, # Official tool NathUI supports
+                                  # run a generated or given python tool
+            ]
+        self.tool_dict = {
+            "web_search_on_internet"  : web_search_on_internet,
+            "data_visitor_online_or_local": data_visitor_online_or_local,
+            "local_file_opener" : local_file_opener,
+            "python_code_executor": python_code_executor,
+            }
+        
+        # Web crawler
+        self.webcrawler = webcrawler
+
         # Search Engine
         self.search_engine = params.nathui_backend_default_search_engine
+        
         # SQLite parameters
         self.default_table = "user_primary"
         self.sqlite_client = SQLiteClient("./__database__/user_database.db")
@@ -268,12 +316,14 @@ class Chatloop:
                 print_device(r"键入 '\syntax' 以打印这个介绍")
                 print_device(r"键入 '\delete' 以删除上一轮的聊天内容")
                 print_device(r"键入 '\deleteall' 以删除本次聊天的所有轮的聊天内容")
+                print_device(r"键入 '\toolcall' 以启用或禁用工具调用(需要模型支持)")
                 # deprecated
                 # print_device(r"键入 '\visit `...`' 以访问网站地址或者本地文件")
                 print_device(r"键入 '\visit `...`  \visit `prompt`' 以访问网站地址或者本地文件并将`prompt`内容设置为访问问答提示词")
                 # deprecated
                 # print_device(r"键入 '\search `...`' 以使用搜索功能进行检索")
                 print_device(r"键入 '\search `...` \search `prompt`' 以使用搜索功能进行检索并将`prompt`内容设置为搜素问答提示词")
+                print_device(r"键入 '\locate `dbpath` \locate `table`' 以连接一个新的外部SQLite数据库文件`dbpath`的表`table`")
                 print_device(r"键入 '\connect' 以连接默认的数据库，如果不存在那么会创建")
                 print_device(r"键入 '\connect `table` \connect' 以连接给定的数据库`table`，如果不存在那么会创建")
                 print_device(r"键入 '\insert `...` \insert `data`' 以向当前数据库新增主键为`...`的数据`data`")
@@ -290,12 +340,14 @@ class Chatloop:
                 print_device(r"Type '\syntax' to print this welcome again")
                 print_device(r"Type '\delete' to delete the previous chat content in the last round")
                 print_device(r"Type '\deleteall' to delete all of the previous chat contents")
+                print_device(r"Type '\toolcall' to enable or disable the tool (requires model support)")
                 # deprecated
                 # print_device(r"Type '\visit `...`' to visit the website or local file, read the content and response")
                 print_device(r"Type '\visit `...`  \visit `prompt`' to visit the website or local file, read the content and response, setting `prompt` as visit prompt")
                 # deprecated
                 # print_device(r"Type '\search `...`' to search ... on the internet'")
                 print_device(r"Type '\search `...` \search `prompt`' to search `...` on the internet and set `prompt` as your search prompt")
+                print_device(r"Type '\locate `dbpath` \locate `table`' to locate to a table `table` of a new external SQLite database file named `dbpath`")
                 print_device(r"Type '\connect' to connect to the default database, and create it if it does not exist")
                 print_device(r"Type '\connect `table` \connect' to connect to the given database `table`, which will be created if it does not exist")
                 print_device(r"Type '\insert `...`  \insert `data`' to add data `data` with primary key `...` to the current database")
@@ -304,6 +356,70 @@ class Chatloop:
                 print_device(r"Type '\select `...`  \select `prompt`' to get data from the current database using DSL syntax, and set the `prompt` content to the database access question prompt")
             
             return None
+        
+    # Fetch loaded model names
+    def fetch_loaded_models(self) -> list:
+        # Retrieve the list of available models from the OpenAI API
+        models_response = self.client.models.list()
+        model_list = []
+        for model in list(models_response):
+            model_list.append(model.id)
+        return model_list
+        
+    # Reattach to a new model
+    def reattach_new_model(self, new_model, base_url = params.nathui_backend_url, api_key = params.nathui_backend_apikey):
+        self.model = new_model
+        self.client = OpenAI(base_url = base_url + "/v1", 
+                        api_key = api_key)
+        
+    # Reset whether to use tools or not
+    def reset_use_tool(self, use_tool_bool: bool = False) -> None:
+        if isinstance(use_tool_bool, bool):
+            self.use_tools = use_tool_bool
+        return None
+        
+    # Append tools to support (call reset_use_tool before querying)
+    def append_supported_tools(self, appended_list: List[Dict], func_name_list: List[str], func_list: List) -> None:
+        if isinstance(appended_list, list):
+            for i in range(len(appended_list)):
+                self.tools.append(appended_list[i])
+                self.tool_dict[func_name_list[i]] = func_list[i]
+        return None
+                
+    # Clear lastround history
+    def clear_lastround(self, keep_system_prompt: bool = True) -> None:
+        
+        # Reset system prompts
+
+        # Clear last response
+        if len(self.responses) > 0:
+            self.responses = self.responses[0:-1]
+
+        # Chat history with actual input/output when using functions
+        if len(self.messages) > 1:
+            # 1 for system prompt
+            mlen = len(self.messages)
+            nwlen = 1
+            for i in range(mlen - 1, -1, -1):
+                if self.messages[i]["role"] != "user":
+                    continue
+                else:
+                    nwlen = i
+                    break
+            self.messages = self.messages[0:nwlen]
+        
+        # Chat history that will be displayed to the user (without showing funcion details)
+        if len(self.original_messages) > 1:
+            # 1 for system prompt
+            mlen = len(self.original_messages)
+            nwlen = 1
+            for i in range(mlen - 1, -1, -1):
+                if self.original_messages[i]["role"] != "user":
+                    continue
+                else:
+                    nwlen = i
+                    break
+            self.original_messages = self.original_messages[0:nwlen]
         
     # Clear chatting history
     def clear_messages(self, keep_system_prompt: bool = True) -> None:
@@ -367,7 +483,42 @@ class Chatloop:
                 self.responses = message_list[3]
             # Otherwise, do nothing
             return self.messages
-
+        
+    # System prompt Getter
+    def system_prompt_get(self) -> str:
+        '''
+        Return a copy of the current system prompt.
+        '''
+        return self.system_prompt.strip()
+    
+    # System prompt Setter
+    def system_prompt_set(self, new_system_prompt:str) -> str:
+        '''
+        Set current system prompt with a new one.
+        '''
+        self.system_prompt = new_system_prompt.strip()
+        return self.system_prompt.strip()
+        
+    # Inference parameters Getter
+    def infer_params_get(self) -> dict:
+        '''
+        Return a copy of the current inference parameters.
+        '''
+        return self.infer_param.copy()
+        
+    # Inference parameters Setter
+    def infer_params_set(self, param_dict: dict) -> dict:
+        '''
+        Set current inference parameters with new values
+        '''
+        for key in param_dict.keys():
+            if self.infer_param.get(key, None) is not None:
+                self.infer_param[key] = param_dict[key]
+            else:
+                # Not allowed to add other params
+                pass
+        return self.infer_param.copy()
+    
     # Handle visit
     def handle_visit(self, splited:str, visit_command:str | None = None) -> str | None:
         '''
@@ -386,6 +537,9 @@ class Chatloop:
         # If a file, read it
         if content_type == 1:
             # Note, pdf DOES NOT support OCR
+            # @todo
+            # Use another model like qwen2.5-vl to handle OCR in 
+            # the future
             if self.visit_cache.get(splited) is not None:
                 # cached
                 file_content = self.visit_cache.get(splited)
@@ -412,9 +566,75 @@ class Chatloop:
                 self.visit_cache[splited] = web_content
             return web_content
         
+        # If a folder, get the table of its immediate content
+        elif content_type == 3:
+            # Get the information of the content in the folder
+            if self.visit_cache.get(splited) is not None:
+                # cached
+                fdr_content = self.visit_cache.get(splited)
+            else:
+                nath_walker = FileWalker(splited, 1)
+                nath_structure = nath_walker.traverse()
+                nath_dataframe = nath_walker.get_pd_dataframe(nath_structure)
+                # Columns to fetch may be subject to change in the future
+                nath_columns = ["path", "type", "size"] # "modification_time"
+                nath_dataframe = nath_dataframe[nath_columns]
+                # Combine into plaintext
+                fdr_content = ""
+                for i in range(nath_dataframe.shape[0]):
+                    fdr_content += "'" + nath_dataframe["path"].iloc[i] + "', "
+                    fdr_content += str(nath_dataframe["type"].iloc[i]) + ", "
+                    fdr_content += str(nath_dataframe["size"].iloc[i]) + "\n"                
+                # Cache it
+                self.visit_cache[splited] = fdr_content
+                
+            return fdr_content
+        
         # Else, abort with None
         else:
             return None
+    
+    # Handle sqlite locate requests
+    def handle_locate(self, dbfilepath:str, table_name:str, catch_except:bool = True) -> None:
+        '''
+        Handle relotating requests to an external SQLite database.
+        @catch_except: always left to be True please.
+        '''
+        # Strip
+        dbfilepath = str_unquote(dbfilepath.strip()) 
+        table_name = str_unquote(table_name.strip()) 
+        
+        # Initialize the relocated database first
+        if os.path.exists(dbfilepath) == False:
+            self.handle_error(f"Database file {dbfilepath} does not exist.")
+        try:
+            self.default_table = table_name
+            self.sqlite_client = SQLiteClient(dbfilepath)
+            self.sqlite_parser = SQLiteParser(self.sqlite_client, self.default_table)
+        except QueryExecutionError as e:
+            # This means table already exists
+            if catch_except:
+                pass
+            else:
+                raise
+        
+        # Connect to or creating a new table then
+        try:
+            self.sqlite_parser.create_table(
+                table_name = table_name.strip(),
+                columns = [
+                    {"name": "key",     "type": str, "primary": True},
+                    {"name": "content", "type": str},
+                    {"name": "version", "type": int}
+                ],
+                safemode = False)
+        except QueryExecutionError as e:
+            # This means table already exists
+            if catch_except:
+                pass
+            else:
+                raise
+        return
     
     # Handle sqlite connect requests
     def handle_connect(self, table_name:str, catch_except:bool = True) -> None:
@@ -531,33 +751,50 @@ class Chatloop:
         return data
     
     # Handle sqlite query requests
-    def handle_query(self, query: str, to_markdown:bool = False, catch_except:bool = True) -> str:
+    def handle_query(self, query: str, to_markdown:bool = False, catch_except:bool = True) -> str | None:
         '''
         Handle custom SELECT requests to SQLite database.
         @to_markdown: to convert markdown or json.
         @catch_except: always left to be True please.
         '''
-        # If table existing, return
-        # If table non-existing, create a standard 
-        # {key: str, value: str, version: int} table
-        data = ""
-        try:
-            data = self.sqlite_client.fetch_all(query, ())
-            data = self.sqlite_parser.to_pandas(data)
-            
-            # No 'content' restriction
-            if to_markdown:
-                return str(data.to_markdown())
-            else:
-                return str(data.to_json())
-            
-        except QueryExecutionError as e:
-            # This means data already exists
-            if catch_except:
-                pass
-            else:
-                raise
-        return data
+        # strip query
+        query = query.strip()
+        
+        # SELECT query? return something
+        if query.upper().startswith("SELECT"):
+            # If table existing, return
+            # If table non-existing, create a standard 
+            # {key: str, value: str, version: int} table
+            data = ""
+            try:
+                data = self.sqlite_client.fetch_all(query, ())
+                data = self.sqlite_parser.to_pandas(data)
+
+                # No 'content' restriction
+                if to_markdown:
+                    return str(data.to_markdown())
+                else:
+                    return str(data.to_json())
+                
+            except QueryExecutionError as e:
+                # This means data already exists
+                if catch_except:
+                    pass
+                else:
+                    raise
+            return data
+        
+        # NON-SEKECT query? return None and needs additional process
+        else:
+            try:
+                self.sqlite_client.execute(query, ())
+            except QueryExecutionError as e:
+                # This means data already exists
+                if catch_except:
+                    pass
+                else:
+                    raise
+            return None
     
     # General logic to handle special commands
     def handle_special_commands(self, user_input) -> str | dict | None:
@@ -601,6 +838,13 @@ class Chatloop:
             self.messages = [self.messages[0]]
             self.original_messages = [self.original_messages[0]]
             return {r"\usage": r"\deleteall"}
+        
+        # Enabling or Disabling toolcall
+        elif user_input.lower() == r"\toolcall" or user_input.lower() == r"\\toolcall":
+            if nathui_global_debug == True:
+                print("User switched toolcall to " + str(not self.use_tools)) # Nath UI
+            self.use_tools = not self.use_tools
+            return {r"\usage": r"\toolcall", r"\result": str(self.use_tools)}
         
         # Visit without prompt
         elif user_input.lower().startswith(r"\visit") and user_input.lower().find(r"\visit", 6) < 0:
@@ -808,6 +1052,40 @@ class Chatloop:
                     }, name = "Search Content")
             return custom_prompt + clean_query + "? " + self.webcrawler.concat(user_input)
         
+        # Connect to an external SQLite database
+        elif user_input.lower().startswith(r"\locate") and user_input.lower().find(r"\locate", 7) > 0:
+            # belike 
+            # r"\visit https:/1.html \visit alrady".split(r"\visit")
+            # Out[66]: ['', ' https:/1.html ', ' alrady']
+            try:
+                nothing, dbfilepath, table_name = user_input.split(r"\locate")
+            except:
+                self.handle_error(f"Invalid prompt: {user_input}")
+                return {}
+            
+            # Try locating
+            self.handle_locate(dbfilepath, table_name)
+            
+            # Process connection
+            return {r"\usage": r"\locate", "to": dbfilepath+"->"+table_name}
+        
+        # Connect to an external SQLite database
+        elif user_input.lower().startswith(r"\\locate") and user_input.lower().find(r"\\locate", 8) > 0:
+            # belike 
+            # r"\visit https:/1.html \visit alrady".split(r"\visit")
+            # Out[66]: ['', ' https:/1.html ', ' alrady']
+            try:
+                nothing, dbfilepath, table_name = user_input.split(r"\\locate")
+            except:
+                self.handle_error(f"Invalid prompt: {user_input}")
+                return {}
+            
+            # Try locating
+            self.handle_locate(dbfilepath, table_name)
+            
+            # Process connection
+            return {r"\usage": r"\locate", "to": dbfilepath+"->"+table_name}
+        
         # Connect to default local database
         elif user_input.lower().startswith(r"\connect") and user_input.lower().find(r"\connect", 8) < 0:
             
@@ -1007,6 +1285,10 @@ class Chatloop:
             try:
                 selected = self.handle_query(select_query)
                 
+                # If a non-select query
+                if selected is None:
+                    return {r"\usage": r"\query", "query": select_query}
+                
                 # NathMath@bilibili and DOF Studio!
                 return "[Answer Question]" + prompt + " based on [Document for Reference] " + selected
             except Exception as e:
@@ -1030,6 +1312,10 @@ class Chatloop:
             # Try to select from the database
             try:
                 selected = self.handle_query(select_query)
+                
+                # If a non-select query
+                if selected is None:
+                    return {r"\usage": r"\query", "query": select_query}
                 
                 # NathMath@bilibili and DOF Studio!
                 return "[Answer Question]" + prompt + " based on [Document for Reference] " + selected
@@ -1269,6 +1555,18 @@ class Chatloop:
                     self.round_number += 1
                     return None
                 
+                # If r"\usage" = "\toolcall" 
+                elif processed_input.get(r"\usage") == r"\toolcall":
+                    next_step("", "`Toolcall switched to " + processed_input.get(r"\result") + "`", user_input)
+                    self.round_number += 1
+                    return None
+                
+                # If r"\usage" = "\locate" 
+                elif processed_input.get(r"\usage") == r"\locate":
+                    next_step("", f"`Relocated and connected to database: {processed_input.get('to')}`", user_input)
+                    self.round_number += 1
+                    return None
+                
                 # If r"\usage" = "\connect" 
                 elif processed_input.get(r"\usage") == r"\connect":
                     next_step("", f"`Connected to table: {processed_input.get('to')}`", user_input)
@@ -1284,6 +1582,12 @@ class Chatloop:
                 # If r"\usage" = "\update" 
                 elif processed_input.get(r"\usage") == r"\update":
                     next_step("", f"`Updated by key: {processed_input.get('key')}`", user_input)
+                    self.round_number += 1
+                    return None
+                
+                # If r"\usage" = "\query" 
+                elif processed_input.get(r"\usage") == r"\query":
+                    next_step("", f"`Executed SQL Query: {processed_input.get('query')}`", user_input)
                     self.round_number += 1
                     return None
                 
@@ -1320,6 +1624,10 @@ class Chatloop:
             #   tool_calls, response = self.request_stream_response()
             
             # Append responses
+            #####
+            #####
+            ## responses always increase as 1
+            ## while messages may not since tool calling requires more spaces
             self.responses.append((tool_calls, response))
                 
             # Append Assistant will be handled by process_response()
@@ -1349,17 +1657,61 @@ class Chatloop:
             else:
                 break
     
-    # In developping... (DO NOT USE)
-    def process_tool_calls(self, tool_calls):
-        self.messages.append({"role": "assistant", "tool_calls": [
-            {"id": tc.id, "type": tc.type, "function": tc.function} for tc in tool_calls
-        ]})
+    # Handle returned special tool-call response
+    def handle_triggered_tool_calls(self, tool_calls) -> Any:
+        
+        ### It should support ALL tool-calls and appended strings of 
+        ### fetched result, which will be then passed to llm
+        
+        # [ChatCompletionMessageToolCall(
+        #  id='332043923', 
+        #  function=Function(
+        #   arguments='{"search_query":"Kaspersky"}', 
+        #   name='fetch_wikipedia_content'
+        #    ), 
+        #   type='function'
+        #   )
+        # ]
+        
+        # Debug, triggered tool calls
+        if debug.nathui_global_debug == True:
+            print("Tool Called: ", tool_calls)
+        
         for tool_call in tool_calls:
+            cid = tool_call.id
+            name = tool_call.function.name
+            func = tool_call.type
+            if func != "function":
+                # omit non-function objects
+                continue
             args = json.loads(tool_call.function.arguments)
-            result = fetch_wikipedia_content(args["search_query"])
-            self.display_interim_content(result)
-            self.messages.append({"role": "tool", "content": json.dumps(result), "tool_call_id": tool_call.id})
-        self.stream_response()
+            
+            # Find if we have this function
+            result = ""
+            if self.tool_dict.get(name, None) is not None:
+                callabl_ = self.tool_dict[name]
+                result = callabl_(**args)
+            else:
+                # If we couldn't find, continue
+                continue
+            
+            # Debug, display interim result
+            if debug.nathui_global_debug == True:
+                self.display_interim_content(result)
+            
+            ### Called messages will be appended here
+            self.messages.append(
+                {"role": "tool",
+                 "content": json.dumps(result), 
+                 "tool_call_id": cid}
+                )
+            self.original_messages.append(
+                {"role": "tool",
+                 "content": json.dumps(result), 
+                 "tool_call_id": cid}
+                )
+        
+        return result
     
     # Process returned response (render or print)
     def process_response(self, content:str, original_input:str, append_response:str = True):
@@ -1388,32 +1740,207 @@ class Chatloop:
         if append_response:
             self.messages.append({"role": "assistant", "content": content})
             self.original_messages.append({"role": "assistant", "content": content})
-            
+    
     # Get one-time response and return whole
-    def request_onetime_response(self):
+    def request_onetime_response(self, model = None):
         # Get response
         
+        # if model is None, use self.model
+        if model is None:
+            model = self.model
+        
         # It is a FREE and OPEN SOURCED software
         # See github.com/dof-studio/NathUI
-        response = self.client.chat.completions.create(model=self.model, messages=self.messages)
-        return response.choices[0].message.tool_calls, response.choices[0].message.content
+        
+        # NOT USING TOOL
+        if self.use_tools == False:
+            response = self.client.chat.completions.create(
+                model=model, 
+                messages=self.messages,
+                **self.infer_param)
+            return response.choices[0].message.tool_calls, response.choices[0].message.content
+            
+        # TOOL-CALL ENABLED
+        else:
+            response = self.client.chat.completions.create(
+                model=model, 
+                messages=self.messages,
+                tools=self.tools,
+                **self.infer_param)
+            
+            if response.choices[0].message.tool_calls:
+                # Handle all tool calls
+                tool_calls = response.choices[0].message.tool_calls
+                
+                # Add 
+                # @todo 
+                # Handle this to external storages like NathUI
+                # Add all tool calls to messages
+                self.messages.append(
+                    {
+                        "role": "assistant",
+                        "tool_calls": [
+                            {
+                                "id": tool_call.id,
+                                "type": tool_call.type,
+                                "function": tool_call.function,
+                            }
+                            for tool_call in tool_calls
+                        ],
+                    }
+                )
+                self.original_messages.append(
+                    {
+                        "role": "assistant",
+                        "tool_calls": [
+                            {
+                                "id": tool_call.id,
+                                "type": tool_call.type,
+                                "function": tool_call.function,
+                            }
+                            for tool_call in tool_calls
+                        ],
+                    }
+                )
+
+                # Call tool and append called messages
+                result = self.handle_triggered_tool_calls(tool_calls)
+                
+                # Does not need to generate again
+                if result.get("response", None) is not None:
+                    # The response is the response
+                    return None, result.get("response")
+                
+                # Request again
+                response = self.client.chat.completions.create(
+                    model=model, 
+                    messages=self.messages,
+                    **self.infer_param)
+                return response.choices[0].message.tool_calls, response.choices[0].message.content
+            
+            else:
+                return response.choices[0].message.tool_calls, response.choices[0].message.content
     
     # Get and Print Stream Response to device (STD print() like devide)
-    def request_stream_response(self, print_device = print):            
-        # Try to get the stream response
-        stream_response = self.client.chat.completions.create(model=self.model, messages=self.messages, stream=True)
-        self.collected_content = ""
-        for chunk in stream_response:
-            if chunk.choices[0].delta.content:
-                content = chunk.choices[0].delta.content
-                print_device(content, end="", flush=True)
-                self.collected_content += content       
-        # It is a FREE and OPEN SOURCED software
-        # See github.com/dof-studio/NathUI
-        print_device()
-        # @todo, how to deal with tool_calls?
-        return None, self.collected_content
+    def request_stream_response(self, print_device = print, model = None):   
+        # Get streamed response
         
+        # if model is None, use self.model
+        if model is None:
+            model = self.model
+            
+        # NOT USING TOOL
+        if self.use_tools == False:
+            
+            # Try to get the stream response
+            stream_response = self.client.chat.completions.create(
+                model=model, 
+                messages=self.messages, 
+                stream=True, 
+                **self.infer_param)
+            self.collected_content = ""
+            for chunk in stream_response:
+                if chunk.choices[0].delta.content:
+                    content = chunk.choices[0].delta.content
+                    print_device(content, end="", flush=True)
+                    self.collected_content += content      
+                    
+            # It is a FREE and OPEN SOURCED software
+            # See github.com/dof-studio/NathUI
+            print_device("\n") #
+            
+            return None, self.collected_content
+            
+        # TOOL-CALL ENABLED
+        else:
+            # Try to get the stream response
+            stream_response = self.client.chat.completions.create(
+                model=model, 
+                messages=self.messages, 
+                tools=self.tools,
+                stream=True, 
+                **self.infer_param)
+            self.collected_tool_calls = ""
+            self.collected_content = ""
+            for chunk in stream_response:
+                # Normal content
+                if chunk.choices[0].delta.content:
+                    content = chunk.choices[0].delta.content
+                    print_device(content, end="", flush=True)
+                    self.collected_content += content 
+                # Tool calls
+                if chunk.choice[0].delta.tool_calls:
+                    tool_content = chunk.choices[0].delta.content
+                    self.collected_tool_calls += tool_content
+                    
+            # If we have non-empty tool_calls
+            if self.collected_tool_calls != "":
+                # Handle all tool calls
+                tool_calls = self.collected_tool_call
+                
+                # Add 
+                # @todo 
+                # Handle this to external storages like NathUI
+                # Add all tool calls to messages
+                self.messages.append(
+                    {
+                        "role": "assistant",
+                        "tool_calls": [
+                            {
+                                "id": tool_call.id,
+                                "type": tool_call.type,
+                                "function": tool_call.function,
+                            }
+                            for tool_call in tool_calls
+                        ],
+                    }
+                )
+                self.original_messages.append(
+                    {
+                        "role": "assistant",
+                        "tool_calls": [
+                            {
+                                "id": tool_call.id,
+                                "type": tool_call.type,
+                                "function": tool_call.function,
+                            }
+                            for tool_call in tool_calls
+                        ],
+                    }
+                )
+                
+                # Call tool and append called messages
+                result = self.handle_triggered_tool_calls(tool_calls)
+                
+                # Does not need to generate again
+                if result.get("response", None) is not None:
+                    # The response is the response
+                    return None, result["response"]
+                
+                # Request again
+                stream_response = self.client.chat.completions.create(
+                    model=model, 
+                    stream=True, 
+                    messages=self.messages,
+                    **self.infer_param)
+                
+                for chunk in stream_response:
+                    # Normal content
+                    if chunk.choices[0].delta.content:
+                        content = chunk.choices[0].delta.content
+                        print_device(content, end="", flush=True)
+                        self.collected_content += content 
+                
+                print_device("\n") # endl
+                return tool_calls, self.collected_content
+                
+            else:
+                # It is a FREE and OPEN SOURCED software
+                # See github.com/dof-studio/NathUI
+                
+                print_device("\n") # endl
+                return None, self.collected_content
+                    
     # Display fetched data, like browsing or file
     def display_interim_content(self, result: str | list, name = "Search Content"):
         # Only enabled in 
@@ -1451,7 +1978,6 @@ class Chatloop:
               f"Contact NathMath@bilibili for more assistance\n")
         # Do not exit(1)
         return None
-
 
 
 # Legacy Chatloop that is NOT updated
@@ -1613,7 +2139,23 @@ def chat_loop():
             exit(1)
 
 
+# Legacy External model list retriver
+def model_list() -> dict:
+    chat = Chatloop()
+    return chat.fetch_loaded_models()
+
+
 if __name__ == "__main__":
     # Displayer : default printing device
     cl = Chatloop(use_external=go_renderer)
+    
+    # Enable tool_calls
+    cl.reset_use_tool(True)
+    
+    # Chat now
     cl.api_chat_loop()
+    
+    
+    
+    
+    

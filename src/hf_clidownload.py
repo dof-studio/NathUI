@@ -6,15 +6,20 @@
 
 # Backend #####################################################################
 
+import os
 import time
 from huggingface_hub import snapshot_download
 
 # Replace with your actual model repository identifier on Hugging Face
-model_id = "deepseek-ai/DeepSeek-R1"
+model_id = "lmstudio-community/Phi-3.5-MoE-instruct-GGUF"
 # Set the directory where you want the repository downloaded
-local_dir = r"F:\AI-Models\2025\DeepSeek-R1"
+local_dir = r"F:\AI-Models\2025\Phi-3.5-MoE-instruct-GGUF"
+if os.path.exists(local_dir) == False:
+    os.makedirs(local_dir)
 # Optional: specify a cache directory for reusing downloaded files
 cache_dir = r"F:\AI-Models\cache"
+if os.path.exists(cache_dir) == False:
+    os.makedirs(cache_dir)
 # Optional: set your Hugging Face authentication token if needed
 hf_token = "hf_..."
 # Optional: specify proxy settings if your network requires them
