@@ -5,6 +5,22 @@
 
 `NathUI` は、フロントエンドとバックエンドが混在する大規模な言語モデルインタラクションフレームワークです。大規模な予測モデルのバックエンドにデプロイまたは接続し、ユーザーの指示に基づいて強化された動作を提供します。サポートされていないアプリケーションにインタラクティブなサービスを提供できます。インターネット検索、特定の Web ページへのアクセス、ローカル データベースへのアクセス、およびアプリケーション ツールの大規模な言語モデルは、ユーザーの指示によって実行される上記の機能をサポートします。さらに、独立した Nath UI ブラウザは、推論インタラクションと Web ブラウジングをサポートする新しい推論フロントエンドとしても機能します。
 
+# Version Control
+`NathUI` Version 0.0.1.1 (One-click 4.1) has updated:
+* Automatic TTS powered by `strlang` and `kokoro-82M` which can provide realtime and realistic voice output.
+* Toolcall functionality and development suite, with default templtetes including `search`, `visit`, `file manipulation`, and `code interpretor`.
+* Agent functionality enabled. Use `NathUI` to find local files and automatically process them!
+
+`NathUI` 0.0.1.1 版（一键包 4.1）已更新：
+* 由 `strlang` 和 `kokoro-82M` 驱动的全自动语音生成，可提供实时逼真的语音输出。
+* 工具调用功能和开发套件，默认模板包括 `搜索`、`访问`、`文件操作` 和 `代码解释器`。
+* 智能代理功能已经加入。使用 `NathUI` 查找本地文件并自动处理它们！
+
+`NathUI` バージョン 0.0.1.1 (ワンクリック 4.1) が更新されました:
+* `strlang` と `kokoro-82M` を利用した自動 TTS により、リアルタイムでリアルな音声出力を提供できます。
+* ツールコール機能と開発スイート。デフォルトのテンプレートには、`search`、`visit`、`file manipulation`、`code interpretor` が含まれます。
+* エージェント機能が有効になりました。`NathUI` を使用してローカル ファイルを検索し、自動的に処理します。
+
 # Attribution
 `NathUI` is an external project of DOF Studio.
 
