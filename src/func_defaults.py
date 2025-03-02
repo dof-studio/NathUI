@@ -72,8 +72,8 @@ DATA_VISITOR_TOOL = {
     "function": {
         "name": "data_visitor_online_or_local",
         "description": (
-            "This function can perform data fetching either from an explicitly specified online url, or from a local file or folder."
-            "Always use this if the user is asking explicitly for `visiting` or `访问` an online address, or accessing to data specified by a file path or folder path. "
+            "This function can perform data fetching and data accessing either from an explicitly specified online url, or from a local file or folder."
+            "Always use this if the user is asking explicitly for `visiting`, `accessing` or `访问` an online address, or accessing to data specified by a file path or folder path. "
             "Make sure to copy the exact online url address or file paths as the argument that the user specified."
         ),
         "parameters": {
@@ -242,21 +242,21 @@ def python_code_executor(python_code:str) -> dict:
         r_result = result["result"]
         r_plot = result.get("plots", None)
         
+        # Content
+        content = f"""
+        ###Code: {python_code} \n\n
+        
+        Result: \n
+        ###Captured Output: 
+            {r_output}, \n
+        """
+        content += f"###Captured Errors: \n {r_error}, \n" if r_error is not None else ""
+        content +=  f"###Evaluation Result: {r_result}, \n" if r_result is not None else ""
+        
         # Generated dict
         ret = {
             "status": "success",
-            "content": f"""
-            ###Code: {python_code} \n\n
-            
-            Result: \n
-            ###Captured Output: 
-                {r_output}, \n
-            ###Captured Errors: 
-                {r_error}, \n
-            ###Evaluation Result: 
-                {r_result}, \n
-            """
-            ,
+            "content": content,
             "title": "Python Code",
         }
         
