@@ -53,7 +53,7 @@ def nathui_param_settings(has_model: bool = True):
     # post-process
     # 1. nathmiddleware should not contain :
     if "nathui_backend_middleware_serve_address" in names:
-        values = names["nathui_backend_middleware_serve_address"].split(":")
+        values = (names["nathui_backend_middleware_serve_address"]).split(":")
         if len(values) == 1:
             pass
         elif len(values) == 2:
